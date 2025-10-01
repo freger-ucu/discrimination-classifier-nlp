@@ -14,9 +14,9 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Work breakdown
 
--   *Name1 Surname1*:
--   *Name2 Surname2*:
--   *Name3 Surname3*:
+-   *Name1 Surname1*: Mykhailo Rykhalskyi
+-   *Name2 Surname2*: Mariia Hamaniuk
+-   *Name3 Surname3*: Ivan Maksymchuk
 
 ## Introduction
 
@@ -68,10 +68,10 @@ on cms and take *mod 5* - this is the number of your data set.
     Lovecraft. The task with this data set is to classify a piece of
     text with the author who was more likely to write it.
 
--   **1 - discrimination** This data set consists of tweets that have
-    discriminatory (sexism or racism) messages or of tweets that are of
-    neutral mood. The task is to determine whether a given tweet has
-    discriminatory mood or does not.
+-   ***1 - discrimination*** **This data set consists of tweets that
+    have discriminatory (sexism or racism) messages or of tweets that
+    are of neutral mood. The task is to determine whether a given tweet
+    has discriminatory mood or does not.**
 
 -   **2 - fake news** This data set contains data of American news: a
     headline and an abstract of the article. Each piece of news is
@@ -100,6 +100,9 @@ library(tidytext)
 library(readr)
 library(dplyr)
 library(ggplot2)
+library(tm)
+library(tibble)
+library(stringr)
 ```
 
 ## Outline of the work
@@ -146,10 +149,10 @@ list.files("1-discrimination")
 ```
 
 ```{r}
-test_path <- "data/0-authors/test.csv"
-train_path <- "data/0-authors/train.csv"
+test_path <- "data/test.csv"
+train_path <- "data/train.csv"
 
-stop_words <- read_file("stop_words.txt")
+stop_words <- read_file("data/stop_words.txt")
 # https://stackoverflow.com/questions/27195912/why-does-strsplit-return-a-list
 splitted_stop_words <- strsplit(stop_words, split='\n')
 splitted_stop_words <- splitted_stop_words[[1]]
@@ -162,10 +165,54 @@ test <-  read.csv(file = test_path, stringsAsFactors = FALSE)
 
 ```{r}
 # note the power functional features of R bring us! 
-tidy_text <- unnest_tokens(train, 'splitted', 'text', token="words") %>%
-             filter(!splitted %in% stop_words)
+# tidy_text <- unnest_tokens(train, 'splitted', 'text', token="words") %>%
+             #filter(!splitted %in% stop_words)
 
-tidy_text %>% count(splitted,sort=TRUE)
+# tidy_text %>% count(splitted,sort=TRUE)
+             
+create_bow_dataframe <- function(file, stop_words_list) {
+  
+  
+  stop_tbl <- tibble(word = unique(tolower(as.character(stop_words_list))))
+  
+  tidy_text <- file %>%
+    mutate(doc_id = row_number(),
+           tweet  = str_replace_all(str_to_lower(tweet), "[^a-z]+", " ")) %>%
+    unnest_tokens(word, tweet, to_lower = FALSE) %>%
+    anti_join(stop_tbl, by = "word") %>%
+    right_join(tibble(doc_id = seq_len(nrow(file))), by = "doc_id") %>%
+    arrange(doc_id)
+  
+  # 3. Підрахунок частоти слів
+  word_counts <- tidy_text %>%
+    count(doc_id, word, sort = FALSE)
+  
+  # 4.1 Створення Document-Term Matrix (DTM) за допомогою tidytext::cast_dtm
+  # Ця функція замінює собою весь блок pivot_wider.
+  # Результат: Розріджена матриця, де Рядки = Документи, Стовпці = Терміни.
+  dtm_sparse <- word_counts %>%
+    cast_dtm(document = doc_id, term = word, value = n)
+  
+  # 4.2 Перетворення розрідженої матриці (DTM) на щільну (Dense Matrix)
+  # Це потрібно, оскільки багато ML-алгоритмів вимагають щільну матрицю.
+  bag_of_words <- as.matrix(dtm_sparse)
+  
+  # 5. Вектор міток (0/1)
+  labels <- ifelse(file$label == "discrim", 1, 0)
+  head(bag_of_words)
+  return(list(bag_of_words = bag_of_words, labels = labels))
+}
+
+train <- create_bow_dataframe(train, splitted_stop_words)
+
+X_train = train$bag_of_words
+y_train = train$labels
+
+
+test <- create_bow_dataframe(test, splitted_stop_words)
+
+X_test = test$bag_of_words
+y_test = test$labels
 ```
 
 ## Data visualization
@@ -182,20 +229,59 @@ naiveBayes <- setRefClass("naiveBayes",
                           
        # here it would be wise to have some vars to store intermediate result
        # frequency dict etc. Though pay attention to bag of words! 
-       fields = list(),
+       fields = list(
+            classes  = "character",
+            vocab    = "character",
+            priors   = "numeric",     # P(class)
+            logtheta = "matrix",      # log P(term|class), rows=vocab, cols=classes ("0","1")
+            alpha    = "numeric"      # Laplace smoothing
+       ),
        methods = list(
                     # prepare your training data as X - bag of words for each of your
                     # messages and corresponding label for the message encoded as 0 or 1 
                     # (binary classification task)
                     fit = function(X, y)
                     {
-                         # TODO
+                          if (is.data.frame(X)) X <- as.matrix(X)
+
+                          y <- as.factor(y)
+
+                          vocab_ <- colnames(X)
+
+                          # Priors P(y)
+                          taby <- table(y)
+                          priors_ <- as.numeric(taby) / sum(taby)
+                          names(priors_) <- levels(y)
+                          
+                          # Class-term counts with Laplace smoothing
+                          a <- ifelse(is.null(.self$alpha), 1, .self$alpha)
+                          counts0 <- if ("0" %in% levels(y) && taby["0"] > 0)
+                            colSums(X[y == "0", , drop = FALSE]) + a else rep(a, ncol(X))
+                          counts1 <- if ("1" %in% levels(y) && taby["1"] > 0)
+                            colSums(X[y == "1", , drop = FALSE]) + a else rep(a, ncol(X))
+                          
+                          # log P(term | class)
+                          logtheta_ <- cbind(
+                            `0` = log(counts0 / sum(counts0)),
+                            `1` = log(counts1 / sum(counts1))
+                          )
+                          rownames(logtheta_) <- vocab_
+                          
+                          # Save params
+                          .self$classes  <- c("0","1")
+                          .self$vocab    <- vocab_
+                          .self$priors   <- priors_
+                          .self$logtheta <- logtheta_
+                          invisible(.self)
                     },
                     
                     # return prediction for a single message 
                     predict = function(message)
                     {
-                         # TODO
+                        x  <- if (is.matrix(message)) message else matrix(message, nrow = 1)
+                        if (is.null(colnames(x))) colnames(x) <- .self$vocab
+                        lp <- x %*% .self$logtheta + rep(log(.self$priors), each = nrow(x))
+                        as.integer(colnames(lp)[max.col(lp, ties.method = "first")])
                     },
                     
                     # score you test set so to get the understanding how well you model
@@ -205,12 +291,37 @@ naiveBayes <- setRefClass("naiveBayes",
                     # try how well your model generalizes to real world data! 
                     score = function(X_test, y_test)
                     {
-                         # TODO
+
+                        if (is.null(colnames(X_test))) {
+                          colnames(X_test) <- .self$vocab[seq_len(min(ncol(X_test), length(.self$vocab)))]
+                        }
+                      
+                        m <- match(.self$vocab, colnames(X_test))
+                        X0 <- matrix(0, nrow(X_test), length(.self$vocab), dimnames = list(NULL, .self$vocab))
+                        
+                        if (any(!is.na(m))){
+                          X0[, !is.na(m)] <- X_test[, m[!is.na(m)], drop = FALSE]
+                        }
+                        
+                        X_test <- X0
+                        yhat  <- apply(X_test, 1, function(row) .self$predict(row))
+                        ytrue <- as.integer(as.character(y_test))
+                        
+                        TP <- sum(yhat==1 & ytrue==1)
+                        FP <- sum(yhat==1 & ytrue==0)
+                        FN <- sum(yhat==0 & ytrue==1)
+                        
+                        precision <- if ((TP+FP)==0) 0 else TP/(TP+FP)
+                        recall    <- if ((TP+FN)==0) 0 else TP/(TP+FN)
+                        f1        <- if ((precision+recall)==0) 0 else 2*precision*recall/(precision+recall)
+                        
+                        c(precision=precision, recall=recall, f1=f1)
                     }
 ))
 
-model = naiveBayes()
-model$fit()
+model = naiveBayes(alpha=1)
+model$fit(X_train, y_train)
+model$score(X_test, y_test)
 ```
 
 ## Measure effectiveness of your classifier
