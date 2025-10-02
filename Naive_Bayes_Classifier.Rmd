@@ -103,6 +103,9 @@ library(ggplot2)
 library(tm)
 library(tibble)
 library(stringr)
+library(scales)  
+library(forcats)
+
 ```
 
 ## Outline of the work
@@ -223,126 +226,126 @@ visualization. Show what are the most common words for negative and
 positive examples as a histogram, word cloud etc. Be creative!
 
 ```{r}
-# Load necessary libraries (make sure these are installed: install.packages(c("tidyverse", "tidytext")))
-library(tidyverse)
-library(tidytext)
-library(stringr)
+stop_tbl <- tibble(word = unique(tolower(as.character(splitted_stop_words))))
 
-# --- Data Preparation Function ---
+word_counts_by_label <- read.csv(train_path) %>%
+  mutate(doc_id = row_number(),
+         label  = factor(label),
+         tweet  = str_replace_all(str_to_lower(tweet), "[^a-z]+", " ")) %>%
+  unnest_tokens(word, tweet, to_lower = FALSE) %>%
+  filter(str_length(word) > 1) %>% 
+  filter(word != "user") %>%
+  anti_join(stop_tbl, by = "word") %>%
+  count(label, word, sort = TRUE)
 
-get_word_counts <- function(file, stop_words_list) {
-  
-  # Create a tibble of stop words for anti_join
-  stop_tbl <- tibble(word = unique(tolower(as.character(stop_words_list))))
-  
-  # --- 1. Tidy the text (Keeping 'label' throughout) ---
-  tidy_text <- file %>%
-    # Create doc_id for consistency (but it's not strictly needed here anymore)
-    mutate(doc_id = row_number(),
-           # Convert to lower case, remove non-alphabetic characters (except spaces)
-           tweet = str_replace_all(str_to_lower(tweet), "[^a-z]+", " ")) %>%
-    # 'label' is kept automatically by the pipe
-    # Unnest tokens (this now keeps doc_id and label alongside 'word')
-    unnest_tokens(word, tweet, to_lower = FALSE) %>%
-    # Remove stop words
-    anti_join(stop_tbl, by = "word") %>%
-    # Keep only words with at least 2 characters
-    filter(str_length(word) >= 2) %>%
-    # Keep only the columns needed for counting
-    select(label, word)
-  
-  # --- 2. Count the words by label ---
-  word_counts <- tidy_text %>%
-    count(label, word, sort = TRUE) %>%
-    # Group by label to calculate the relative frequency
+total_discrim_words <- word_counts_by_label %>%
+    filter(label == "discrim") %>%
+    summarise(total = sum(n)) %>%
+    pull(total)
+
+total_neutral_words <- word_counts_by_label %>%
+    filter(label == "neutral") %>%
+    summarise(total = sum(n)) %>%
+    pull(total)
+
+top_20_words <- word_counts_by_label %>%
+    mutate(
+        percent = case_when(
+            label == "discrim" ~ (n / total_discrim_words) * 100,
+            label == "neutral" ~ (n / total_neutral_words) * 100
+        )
+    ) %>%
     group_by(label) %>%
-    mutate(total_words = sum(n),
-           proportion = n / total_words) %>%
-    ungroup()
-  
-  return(word_counts)
-}
+    top_n(20, percent) %>%
+    ungroup() %>%
 
-# --- Apply the function to the 'train' dataset ---
+    mutate(
+        percent_signed = ifelse(label == "discrim", -percent, percent)
+    )
 
-# ---
-train_raw <- read.csv(file=train_path, stringsAsFactors = FALSE)
-# Get the processed word count data
-
-# *** MODIFIED LINE: Take only the first 1000 rows to save memory ***
-train_subset <- train_raw %>% 
-  slice(1:1000)
-
-word_freqs <- get_word_counts(train_subset, splitted_stop_words)
-
-
-# --- Prepare Data for Butterfly Chart ---
-
-# 1. Filter for the top N words overall (e.g., top 15 words in BOTH categories)
-top_n <- 15 
-# Find the top 15 words by their total count across both labels
-top_words <- word_freqs %>%
+# 1. Ensure the words are ordered by frequency (using the count 'n' is fine here)
+word_order <- top_20_words %>%
   group_by(word) %>%
-  summarise(total_n = sum(n)) %>%
-  slice_max(total_n, n = top_n * 2) %>% # Get more than N to ensure coverage
+  summarize(max_n = max(n)) %>% # 'n' is the absolute count
+  arrange(max_n) %>%
   pull(word)
 
-# 2. Reshape and modify for the chart
-plot_data <- word_freqs %>%
-  # Filter to only include the top words
-  filter(word %in% top_words) %>%
-  # Pivot wider to get 'discrim' and 'neutral' proportions side-by-side
-  select(label, word, proportion) %>%
-  pivot_wider(names_from = label, values_from = proportion, values_fill = 0) %>%
-  # Calculate the difference for sorting
-  mutate(diff = discrim - neutral) %>%
-  # Sort by the difference to highlight unique words for each group
-  arrange(diff) %>%
-  # Convert 'word' to a factor to enforce the sorted order in the plot
-  mutate(word = factor(word, levels = word)) %>%
-  # Reshape back to long format for ggplot (using the factor levels)
-  pivot_longer(cols = c("discrim", "neutral"), names_to = "label", values_to = "proportion") %>%
-  # For the 'discrim' side, negate the proportion to make the bars point left
-  mutate(percent = proportion * 100) %>%
-  mutate(proportion = ifelse(label == "discrim", -percent, percent))
+top_20_words$word <- factor(top_20_words$word, levels = word_order)
 
-# --- Create the Butterfly Chart (Bilateral Bar Chart) ---
+# 2. Generate the plot
+ggplot(
+  data = top_20_words,
+  mapping = aes(x = percent_signed, y = word, fill = label) 
+) +
+  geom_col() +
 
-butterfly_chart <- plot_data %>%
-  ggplot(aes(x = proportion, y = word, fill = label)) +
-  # Use geom_bar for the bars
-  geom_bar(stat = "identity", position = "identity") +
-  # Add a vertical line at 0
-  geom_vline(xintercept = 0, color = "black", linetype = "solid", linewidth = 0.5) +
-  # Customize colors
-  scale_fill_manual(values = c("discrim" = "#E37070", "neutral" = "#70A6E3"),
-                    labels = c("discrim" = "Discriminatory Tweets", 
-                               "neutral" = "Neutral Tweets")) +
-  # Customize labels and title
-  labs(title = paste("Top", length(unique(plot_data$word)), "Words: Discriminatory vs. Neutral Tweets"),
-       subtitle = "Word Proportions in Each Category",
-       x = "Proportion of Words (Neutral -> Positive | Discriminatory -> Negative)",
-       y = NULL, # Remove y-axis label since the words are the labels
-       fill = "Tweet Category") +
-  # Use a theme and make it look clean
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")), 
+    hjust = ifelse(top_20_words$label == "discrim", 1.2, -0.2),
+    size = 3
+  ) +
+
+  scale_fill_manual(values = c("discrim" = "#E41A1C", "neutral" = "#377EB8")) +
+
+  scale_x_continuous(
+    labels = abs,
+    limits = c(-max(top_20_words$percent) * 1.2, max(top_20_words$percent) * 1.2),
+    breaks = scales::pretty_breaks(n = 6)
+  ) +
+
+  labs(
+    title = "Top 20 Most Frequent Words by Sentiment",
+    subtitle = "Comparing Discriminatory vs. Neutral Tweet Content (Percentages of Category Total)",
+    x = "Word Frequency (Percent of Total Words in Category)",
+    y = NULL,
+    fill = "Sentiment"
+  ) +
   theme_minimal() +
   theme(
-    # Center and bold the title
     plot.title = element_text(hjust = 0.5, face = "bold"),
-    # Customize axis text appearance
-    axis.text.x = element_text(angle = 0, hjust = 0.5),
-    # Move the legend to the top
-    legend.position = "top",
-    # Remove grid lines for a cleaner look
-    panel.grid.major.y = element_blank(),
-    panel.grid.minor = element_blank()
-  ) +
-  # Use a custom scale for x-axis to show positive numbers on both sides
-  scale_x_continuous(labels = abs) 
-
-# Print the chart
-print(butterfly_chart)
+    axis.text.y = element_text(face = "bold"),
+    panel.grid.major.y = element_blank()
+  )
 ```
+
+# Disrim words cahrt
+```{r}
+top_20_words <- top_20_words %>%
+    group_by(label) %>%
+    # Calculate rank based on percentage (descending order)
+    mutate(rank = rank(desc(percent), ties.method = "min")) %>%
+    ungroup() %>%
+    # Create the combined label for the Y-axis
+    mutate(word_rank_label = paste0(rank, ". ", word))
+
+discrim_data <- top_20_words %>%
+  filter(label == "discrim") %>%
+  # Reorder the factor levels for the plot to be sorted correctly
+  mutate(word_rank_label = fct_reorder(word_rank_label, percent))
+
+discrim_plot <- ggplot(discrim_data, aes(x = percent, y = word_rank_label)) +
+  geom_col(fill = "#E41A1C") + 
+  geom_text(aes(label = percent(percent / 100, accuracy = 0.1)), 
+            hjust = -0.1, 
+            size = 3.5) +
+  scale_x_continuous(labels = percent_format(scale = 1), expand = expansion(mult = c(0, 0.1))) +
+  labs(
+    title = "Top 20 Most Frequent Words in 'Discrim' Tweets",
+    subtitle = paste0("Percentage relative to total words in 'Discrim' category (Total words: ", 
+                      scales::comma(total_discrim_words), ")"),
+    x = "Word Frequency (Percentage)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0, face = "bold"),
+    plot.subtitle = element_text(hjust = 0),
+    panel.grid.major.y = element_blank()
+  )
+
+print(discrim_plot)
+```
+
 
 ## Classifier implementation
 
@@ -441,48 +444,48 @@ naiveBayes <- setRefClass("naiveBayes",
                     }
 ))
 
-model = naiveBayes(alpha=1)
-model$fit(X_train, y_train)
-model$score(X_test, y_test)
+# model = naiveBayes(alpha=1)
+# model$fit(X_train, y_train)
+# model$score(X_test, y_test)
 ```
 
 
 ```{r}
 #visualizing prediction, f1, and recall
 
-# 1. Score the model to get the metrics
-model_scores <- model$score(X_test, y_test)
+# # 1. Score the model to get the metrics
+# model_scores <- model$score(X_test, y_test)
 
-# 2. Prepare the data for ggplot
-metrics_df <- data.frame(
-  Metric = names(model_scores),
-  Value = as.numeric(model_scores)
-)
+# # 2. Prepare the data for ggplot
+# metrics_df <- data.frame(
+#   Metric = names(model_scores),
+#   Value = as.numeric(model_scores)
+# )
 
-# 3. Create the bar chart visualization
-metrics_plot <- metrics_df %>%
-  ggplot(aes(x = reorder(Metric, Value, desc = TRUE), y = Value, fill = Metric)) +
-  geom_bar(stat = "identity", width = 0.7) +
-  # Add the score value text on top of the bars
-  geom_text(aes(label = round(Value, 3)), vjust = -0.5, size = 5, color = "black") +
-  labs(
-    title = "Naive Bayes Classifier Performance Metrics",
-    subtitle = "Precision, Recall, and F1 Score",
-    x = "Metric",
-    y = "Score Value"
-  ) +
-  # Set the Y-axis limit to 0-1 for clarity
-  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
-  # Customize colors
-  scale_fill_manual(values = c("precision" = "#70A6E3", "recall" = "#E37070", "f1" = "#4CAF50")) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(hjust = 0.5, face = "bold"),
-    legend.position = "none",
-    panel.grid.major.x = element_blank()
-  )
+# # 3. Create the bar chart visualization
+# metrics_plot <- metrics_df %>%
+#   ggplot(aes(x = reorder(Metric, Value, desc = TRUE), y = Value, fill = Metric)) +
+#   geom_bar(stat = "identity", width = 0.7) +
+#   # Add the score value text on top of the bars
+#   geom_text(aes(label = round(Value, 3)), vjust = -0.5, size = 5, color = "black") +
+#   labs(
+#     title = "Naive Bayes Classifier Performance Metrics",
+#     subtitle = "Precision, Recall, and F1 Score",
+#     x = "Metric",
+#     y = "Score Value"
+#   ) +
+#   # Set the Y-axis limit to 0-1 for clarity
+#   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+#   # Customize colors
+#   scale_fill_manual(values = c("precision" = "#70A6E3", "recall" = "#E37070", "f1" = "#4CAF50")) +
+#   theme_minimal() +
+#   theme(
+#     plot.title = element_text(hjust = 0.5, face = "bold"),
+#     legend.position = "none",
+#     panel.grid.major.x = element_blank()
+#   )
 
-print(metrics_plot)
+# print(metrics_plot)
 ```
 
 ## Measure effectiveness of your classifier
