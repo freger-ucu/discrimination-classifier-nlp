@@ -269,7 +269,7 @@ get_word_counts <- function(file, stop_words_list) {
 train_raw <- read.csv(file=train_path, stringsAsFactors = FALSE)
 # Get the processed word count data
 
-# *** MODIFIED LINE: Take only the first 2000 rows to save memory ***
+# *** MODIFIED LINE: Take only the first 1000 rows to save memory ***
 train_subset <- train_raw %>% 
   slice(1:1000)
 
