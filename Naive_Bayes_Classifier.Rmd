@@ -248,40 +248,42 @@ total_neutral_words <- word_counts_by_label %>%
     summarise(total = sum(n)) %>%
     pull(total)
 
-top_20_words <- word_counts_by_label %>%
+top_20_words_overall <- word_counts_by_label %>%
+    group_by(word) %>%
+    summarise(total_n = sum(n)) %>%
+    top_n(20, total_n) %>%
+    pull(word)
+
+top_words_by_label <- word_counts_by_label %>%
+    filter(word %in% top_20_words_overall) %>%
     mutate(
         percent = case_when(
             label == "discrim" ~ (n / total_discrim_words) * 100,
             label == "neutral" ~ (n / total_neutral_words) * 100
         )
     ) %>%
-    group_by(label) %>%
-    top_n(20, percent) %>%
-    ungroup() %>%
-
     mutate(
         percent_signed = ifelse(label == "discrim", -percent, percent)
     )
 
-# 1. Ensure the words are ordered by frequency (using the count 'n' is fine here)
-word_order <- top_20_words %>%
+word_order <- top_words_by_label %>%
   group_by(word) %>%
-  summarize(max_n = max(n)) %>% # 'n' is the absolute count
+  summarize(max_n = sum(n)) %>%
   arrange(max_n) %>%
   pull(word)
 
-top_20_words$word <- factor(top_20_words$word, levels = word_order)
+top_words_by_label$word <- factor(top_words_by_label$word, levels = word_order)
 
-# 2. Generate the plot
 ggplot(
-  data = top_20_words,
+  data = top_words_by_label,
   mapping = aes(x = percent_signed, y = word, fill = label) 
 ) +
   geom_col() +
 
   geom_text(
+    data = top_words_by_label, 
     aes(label = paste0(round(percent, 1), "%")), 
-    hjust = ifelse(top_20_words$label == "discrim", 1.2, -0.2),
+    hjust = ifelse(top_words_by_label$label == "discrim", 1.2, -0.2),
     size = 3
   ) +
 
@@ -289,12 +291,12 @@ ggplot(
 
   scale_x_continuous(
     labels = abs,
-    limits = c(-max(top_20_words$percent) * 1.2, max(top_20_words$percent) * 1.2),
+    limits = c(-max(top_words_by_label$percent) * 1.2, max(top_words_by_label$percent) * 1.2),
     breaks = scales::pretty_breaks(n = 6)
   ) +
 
   labs(
-    title = "Top 20 Most Frequent Words by Sentiment",
+    title = "Top 20 Overall Words: Frequency by Sentiment Category",
     subtitle = "Comparing Discriminatory vs. Neutral Tweet Content (Percentages of Category Total)",
     x = "Word Frequency (Percent of Total Words in Category)",
     y = NULL,
@@ -306,44 +308,6 @@ ggplot(
     axis.text.y = element_text(face = "bold"),
     panel.grid.major.y = element_blank()
   )
-```
-
-# Disrim words cahrt
-```{r}
-top_20_words <- top_20_words %>%
-    group_by(label) %>%
-    # Calculate rank based on percentage (descending order)
-    mutate(rank = rank(desc(percent), ties.method = "min")) %>%
-    ungroup() %>%
-    # Create the combined label for the Y-axis
-    mutate(word_rank_label = paste0(rank, ". ", word))
-
-discrim_data <- top_20_words %>%
-  filter(label == "discrim") %>%
-  # Reorder the factor levels for the plot to be sorted correctly
-  mutate(word_rank_label = fct_reorder(word_rank_label, percent))
-
-discrim_plot <- ggplot(discrim_data, aes(x = percent, y = word_rank_label)) +
-  geom_col(fill = "#E41A1C") + 
-  geom_text(aes(label = percent(percent / 100, accuracy = 0.1)), 
-            hjust = -0.1, 
-            size = 3.5) +
-  scale_x_continuous(labels = percent_format(scale = 1), expand = expansion(mult = c(0, 0.1))) +
-  labs(
-    title = "Top 20 Most Frequent Words in 'Discrim' Tweets",
-    subtitle = paste0("Percentage relative to total words in 'Discrim' category (Total words: ", 
-                      scales::comma(total_discrim_words), ")"),
-    x = "Word Frequency (Percentage)",
-    y = NULL
-  ) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(hjust = 0, face = "bold"),
-    plot.subtitle = element_text(hjust = 0),
-    panel.grid.major.y = element_blank()
-  )
-
-print(discrim_plot)
 ```
 
 
